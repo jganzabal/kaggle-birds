@@ -26,6 +26,7 @@ class DataGenerator(Sequence):
         self.classes_dict = {cl:i for i, cl in enumerate(self.classes)}
         self.n_classes = len(self.classes)
         self.on_epoch_end()
+        print(self.classes_dict)
 
     def __len__(self):
         'Denotes the number of batches per epoch'
@@ -107,3 +108,56 @@ def create_train_val_folders(dataset_folder, all_subfolder = 'all/', train_subfo
     for f in audio_files_val:
         if '.npy' in f:
             copyfile(f, f.replace(all_subfolder, val_subfolder))
+
+def get_train_val_files(audio_files, ratio = 0.2):
+    class_audio_files = np.sort(audio_files)
+    cut_index = int(len(class_audio_files)*ratio)
+    file_id = class_audio_files[cut_index].split('/')[-1].split('_')[0]
+
+    while class_audio_files[cut_index].split('/')[-1].split('_')[0] == file_id:
+        cut_index += 1
+    val_files = class_audio_files[:cut_index]
+    train_files = class_audio_files[cut_index:]
+    return train_files, val_files
+
+def create_train_val_folders_with_diff_files(dataset_folder, all_subfolder = 'all/', train_subfolder = 'train/', val_subfolder = 'val/', ratio = 0.2):
+    dataset_folder_all = dataset_folder + all_subfolder
+    dataset_folder_train = dataset_folder + train_subfolder
+    dataset_folder_val = dataset_folder + val_subfolder
+    filenames = glob(dataset_folder_all+'**/*', recursive=True)
+    print(dataset_folder_train)
+    print(dataset_folder_val)
+    classes = []
+    audio_files = []
+    for file in filenames:
+        filename = file.split('/')[-1]
+        if '.npy' not in filename:
+            classes.append(filename)
+        else:
+            audio_files.append(file)
+    if not os.path.exists(dataset_folder_train):
+        os.makedirs(dataset_folder_train)
+    if not os.path.exists(dataset_folder_val):
+        os.makedirs(dataset_folder_val)
+        
+    files_dict = {}
+    for cl in classes:
+        new_folder = dataset_folder_train + cl
+        files_dict[cl] = glob(dataset_folder_all+cl+'/**/*', recursive=True)
+        if not os.path.exists(new_folder):
+            os.makedirs(new_folder)
+        new_folder = dataset_folder_val + cl
+        if not os.path.exists(new_folder):
+            os.makedirs(new_folder)
+            
+    for k, v in files_dict.items():
+        train_files, val_files = get_train_val_files(v, ratio = ratio)
+        print(len(val_files) / len(train_files))
+        for f in train_files:
+            if '.npy' in f:
+                copyfile(f, f.replace(all_subfolder, train_subfolder))
+
+        for f in val_files:
+            if '.npy' in f:
+                copyfile(f, f.replace(all_subfolder, val_subfolder))
+    return
