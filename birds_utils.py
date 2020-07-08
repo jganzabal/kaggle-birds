@@ -59,11 +59,14 @@ class DataGenerator(Sequence):
         for i, ID in enumerate(list_IDs_temp):
             # Store sample
 #             X[i,] = np.load(ID)
-            X.append(np.load(ID))
+            x = np.load(ID)
+            print(x.shape)
+            X.append(x)
             # Store class
 #             y[i] = self.classes_dict[ID.split('/')[-2]]
             y.append(self.classes_dict[ID.split('/')[-2]])
         X = np.array(X)
+        print(X.shape)
         return X.reshape(*X.shape, 1), to_categorical(y, num_classes=self.n_classes) # np.array(y).reshape(-1, 1) # tensorflow.keras.utils.to_categorical(y, num_classes=self.n_classes)
     
     
@@ -161,3 +164,66 @@ def create_train_val_folders_with_diff_files(dataset_folder, all_subfolder = 'al
             if '.npy' in f:
                 copyfile(f, f.replace(all_subfolder, val_subfolder))
     return
+
+
+
+##########
+from pydub import AudioSegment
+
+FOLDER = '/home/usuario/birds/birdsong-recognition/'
+TRAIN_FOLDER = FOLDER + 'train_audio/'
+
+def get_train_clip(dataframe, resample=None):
+    filename = TRAIN_FOLDER+dataframe['ebird_code']+'/'+dataframe['filename']
+    sound = AudioSegment.from_mp3(filename)
+    orig_sr = sound.frame_rate
+    if resample is not None:
+        sound = sound.set_frame_rate(resample)
+    clip = sound.get_array_of_samples()
+    duration = sound.duration_seconds
+
+    clip = np.array(clip)
+    clip = (clip - clip.mean())/np.abs(clip).std()
+    return clip, orig_sr, duration
+
+
+def sound_slice(x, sr = 22050, chunk_seconds=5, hop_seconds=1, discard_last=True):
+    hop_size = int(hop_seconds*sr)
+    chunk_size = int(chunk_seconds*sr)
+    n_chunks = len(x) // hop_size
+    chunks = []
+    for i in range(n_chunks):
+        chunk = x[i*hop_size: i*hop_size + chunk_size]
+        if discard_last and len(chunk) == chunk_size:
+            chunks.append(chunk)
+        elif not discard_last:
+            chunks.append(chunk)
+            
+    return chunks
+
+def save_chunks(ebird_folder, dataframe_row, target_sr = 22050, chunk_seconds=5, hop_seconds=1, std_thres = 0.1, save = True, discard_last=True):
+    under_tres = []
+    x, orig_sr, duration = get_train_clip(dataframe_row, target_sr)
+    chunks = sound_slice(x, sr = target_sr, chunk_seconds=chunk_seconds, hop_seconds=hop_seconds, discard_last=True)
+
+    for j, chunk in enumerate(chunks):
+        chunk_std = chunk.std()
+
+        if chunk_std > std_thres:
+            if save:
+                file_to_save = ebird_folder + ''.join(dataframe_row['filename'].split('.')[:-1]) + f'_{j+1}_{chunk_seconds}_{hop_seconds}.npy'
+                print(f'\r{j} - {file_to_save}', end='')
+                if not os.path.exists(file_to_save):
+                    np.save(file_to_save, chunk)
+
+        else:
+            under_tres.append(chunk)
+
+def save_class_dataset(train, dataset_folder, ebird_code, target_sr = 22050, chunk_seconds=5, hop_seconds=1, std_thres = 0.1, discard_last=True):
+    dataframe = train[train['ebird_code']==ebird_code]
+    ebird_folder = dataset_folder + ebird_code + '/'
+    if not os.path.exists(ebird_folder):
+        os.makedirs(ebird_folder)
+    for i in range(len(dataframe)): 
+        dataframe_row = dataframe.iloc[i]
+        save_chunks(ebird_folder, dataframe_row, target_sr = target_sr, chunk_seconds=chunk_seconds, hop_seconds=hop_seconds, std_thres = std_thres, discard_last=discard_last)
