@@ -60,13 +60,11 @@ class DataGenerator(Sequence):
             # Store sample
 #             X[i,] = np.load(ID)
             x = np.load(ID)
-            print(x.shape)
             X.append(x)
             # Store class
 #             y[i] = self.classes_dict[ID.split('/')[-2]]
             y.append(self.classes_dict[ID.split('/')[-2]])
         X = np.array(X)
-        print(X.shape)
         return X.reshape(*X.shape, 1), to_categorical(y, num_classes=self.n_classes) # np.array(y).reshape(-1, 1) # tensorflow.keras.utils.to_categorical(y, num_classes=self.n_classes)
     
     
@@ -155,7 +153,7 @@ def create_train_val_folders_with_diff_files(dataset_folder, all_subfolder = 'al
             
     for k, v in files_dict.items():
         train_files, val_files = get_train_val_files(v, ratio = ratio)
-        print(len(val_files) / len(train_files))
+        print(len(val_files) / (len(train_files) + len(val_files)))
         for f in train_files:
             if '.npy' in f:
                 copyfile(f, f.replace(all_subfolder, train_subfolder))
