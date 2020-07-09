@@ -5,6 +5,41 @@ from glob import glob
 from shutil import copyfile
 import os
 
+def get_extentions(TRAIN_FOLDER):
+    source_filenames = glob(TRAIN_FOLDER+'**/*', recursive=True)
+    extentions = []
+    for file in source_filenames:
+        spl = file.split('.')
+        if len(spl)>1:
+            ext = spl[-1]
+            if ext not in extentions:
+                extentions.append(ext)
+    return extentions
+
+def audio_to_npy(TRAIN_FOLDER, TARGET_FOLDER, extentions, classes):
+    
+    if not os.path.exists(TARGET_FOLDER):
+        os.makedirs(TARGET_FOLDER)
+    target_sr = 22050
+    extentions = get_extentions(TRAIN_FOLDER)
+    source_filenames = glob(TRAIN_FOLDER+'**/*', recursive=True)
+    for file in source_filenames:
+        ext = file.split('.')[-1]
+        splt = file.split('/')
+        cl = splt[-2]
+        name = splt[-1]
+        if ext in extentions and cl in classes:
+            sound = AudioSegment.from_mp3(file)
+            sound = sound.set_frame_rate(target_sr)
+            clip = sound.get_array_of_samples()
+            clip = np.array(clip)
+            clip = (clip - clip.mean())/np.abs(clip).std()
+            dst_folder = TARGET_FOLDER  + cl + '/'
+            if not os.path.exists(dst_folder):
+                os.makedirs(dst_folder)
+            dst_file = dst_folder  + name + '.npy'
+            np.save(dst_file, clip)
+
 class DataGenerator(Sequence):
     'Generates data for Keras'
     def __init__(self, dataset_folder, batch_size=32,  shuffle=True, sample_size=44100):
@@ -171,16 +206,27 @@ from pydub import AudioSegment
 FOLDER = '/home/usuario/birds/birdsong-recognition/'
 TRAIN_FOLDER = FOLDER + 'train_audio/'
 
-def get_train_clip(dataframe, resample=None):
-    filename = TRAIN_FOLDER+dataframe['ebird_code']+'/'+dataframe['filename']
+def get_train_clip(dataframe, resample=None, chunk_size = None):
+    if type(dataframe) in [str, np.str_]:
+        filename = dataframe
+    else:
+        filename = TRAIN_FOLDER+dataframe['ebird_code']+'/'+dataframe['filename']
     sound = AudioSegment.from_mp3(filename)
     orig_sr = sound.frame_rate
     if resample is not None:
         sound = sound.set_frame_rate(resample)
+    else:
+        resample = orig_sr
     clip = sound.get_array_of_samples()
     duration = sound.duration_seconds
-
-    clip = np.array(clip)
+    
+    if chunk_size is not None:
+        fr = int(np.random.rand(1)*(duration-chunk_size) * resample)
+        to = fr + chunk_size * resample
+        clip = np.array(clip)[fr:to]
+    else:
+        clip = np.array(clip)
+        
     clip = (clip - clip.mean())/np.abs(clip).std()
     return clip, orig_sr, duration
 
@@ -225,3 +271,163 @@ def save_class_dataset(train, dataset_folder, ebird_code, target_sr = 22050, chu
     for i in range(len(dataframe)): 
         dataframe_row = dataframe.iloc[i]
         save_chunks(ebird_folder, dataframe_row, target_sr = target_sr, chunk_seconds=chunk_seconds, hop_seconds=hop_seconds, std_thres = std_thres, discard_last=discard_last)
+        
+        
+        
+#####
+
+from pydub.utils import mediainfo
+def get_class_audio_files_npy(TRAIN_FOLDER, classes = ['amegfi', 'amecro', 'aldfly'], min_duration=5, ratio = 0.2, extention='.npy', sr=22050):
+    class_audiofiles = {}
+    for cl in classes:
+        audio_files = []
+        durations = []
+        cl_folder = TRAIN_FOLDER + cl 
+        cl_audio_files = glob(cl_folder+'/**/*', recursive=True)
+        duration = 0
+        for file in cl_audio_files:
+            filename = file.split('/')[-1]
+            
+            if extention in filename:
+                clip = np.load(file)
+                duration = len(clip)/sr
+                if duration>=min_duration:
+                    durations.append(duration)
+                    audio_files.append(file)
+
+        audio_files = np.array(audio_files) 
+        indexes = np.random.shuffle(list(range(len(audio_files))))
+        class_audiofiles[cl] = {}
+        class_audiofiles[cl]['files'] = np.array(audio_files)[indexes].reshape(-1)
+        class_audiofiles[cl]['durations'] = np.array(durations)[indexes].reshape(-1)
+        
+    train_files = []
+    val_files = []
+    train_labels = []
+    val_labels = []
+    for cl in classes:
+        duration = class_audiofiles[cl]['durations'].sum()
+        acc_dur = 0
+
+        for i, file in enumerate(class_audiofiles[cl]['files']):
+            acc_dur += class_audiofiles[cl]['durations'][i]
+            if acc_dur/duration >= ratio:
+                train_files = train_files + list(class_audiofiles[cl]['files'][i:])
+                val_files = val_files + list(class_audiofiles[cl]['files'][:i])
+                train_labels = train_labels + [cl]*(len(class_audiofiles[cl]['files']) - i)
+                val_labels = val_labels + [cl]*i
+                print(acc_dur/duration)
+                break
+    return class_audiofiles, train_files, val_files, train_labels, val_labels
+
+def get_class_audio_files(TRAIN_FOLDER, classes = ['amegfi', 'amecro', 'aldfly'], min_duration=5, ratio = 0.2):
+    class_audiofiles = {}
+    for cl in classes:
+        audio_files = []
+        durations = []
+        cl_folder = TRAIN_FOLDER + cl 
+        cl_audio_files = glob(cl_folder+'/**/*', recursive=True)
+        duration = 0
+        for file in cl_audio_files:
+            filename = file.split('/')[-1]
+            if '.mp3' in filename:
+                info = mediainfo(file)
+                duration = float(info['duration'])
+                if duration>=min_duration:
+                    durations.append(duration)
+                    audio_files.append(file)
+
+        audio_files = np.array(audio_files) 
+        indexes = np.random.shuffle(list(range(len(audio_files))))
+        class_audiofiles[cl] = {}
+        class_audiofiles[cl]['files'] = np.array(audio_files)[indexes].reshape(-1)
+        class_audiofiles[cl]['durations'] = np.array(durations)[indexes].reshape(-1)
+        
+    train_files = []
+    val_files = []
+    train_labels = []
+    val_labels = []
+    for cl in classes:
+        duration = class_audiofiles[cl]['durations'].sum()
+        acc_dur = 0
+
+        for i, file in enumerate(class_audiofiles[cl]['files']):
+            acc_dur += class_audiofiles[cl]['durations'][i]
+            if acc_dur/duration >= ratio:
+                train_files = train_files + list(class_audiofiles[cl]['files'][i:])
+                val_files = val_files + list(class_audiofiles[cl]['files'][:i])
+                train_labels = train_labels + [cl]*(len(class_audiofiles[cl]['files']) - i)
+                val_labels = val_labels + [cl]*i
+                print(acc_dur/duration)
+                break
+    return class_audiofiles, train_files, val_files, train_labels, val_labels
+
+class DataGeneratorV2(Sequence):
+    'Generates data for Keras'
+    def __init__(self, files, labels, batch_size=32,  shuffle=True, sr=22050, chunk_seconds=5, min_std=0.02):
+        'Initialization'
+        self.batch_size = batch_size
+        self.shuffle = shuffle
+        self.classes = np.unique(labels)
+        self.labels = labels
+        self.audio_files = np.array(files)
+        self.chunk_samples = chunk_seconds * sr
+        self.min_std = min_std
+        
+
+        self.classes_dict = {cl:i for i, cl in enumerate(self.classes)}
+        self.n_classes = len(self.classes)
+        self.on_epoch_end()
+        print(self.classes_dict)
+
+    def __len__(self):
+        'Denotes the number of batches per epoch'
+        return int(np.floor(len(self.audio_files) / self.batch_size)) + 1
+
+    def __getitem__(self, index):
+        'Generate one batch of data'
+        # Generate indexes of the batch
+        indexes = self.indexes[index*self.batch_size:(index+1)*self.batch_size]
+
+        # Generate data
+        X, y = self.__data_generation(self.audio_files[indexes])
+
+        return X, y
+
+    def on_epoch_end(self):
+        'Updates indexes after each epoch'
+        self.indexes = np.arange(len(self.audio_files))
+        if self.shuffle == True:
+            np.random.shuffle(self.indexes)
+
+    def sample_audio_clip(self, clip):
+        fr = int(np.random.rand(1)*(len(clip)-self.chunk_samples))
+        to = fr + self.chunk_samples
+        x = clip[fr:to]
+        return x, fr, to
+        
+    def __data_generation(self, list_IDs_temp):
+        'Generates data containing batch_size samples' # X : (n_samples, *dim, n_channels)
+        # Initialization
+        X = []
+        y = []
+        # Generate data
+        for i, ID in enumerate(list_IDs_temp):
+            # Store sample
+#             X[i,] = np.load(ID)
+            clip = np.load(ID)
+            x, fr, to = self.sample_audio_clip(clip)
+            std = x.std()
+            while std < self.min_std:
+                x, fr, to = self.sample_audio_clip(clip)
+                std = x.std()
+            
+            X.append(x)
+            # Store class
+#             y[i] = self.classes_dict[ID.split('/')[-2]]
+            label = self.labels[self.indexes[i]]
+#             print(ID, label, self.classes_dict[label])
+            y.append(self.classes_dict[ID.split('/')[-2]])
+#             y.append(self.classes_dict[label])
+        X = np.array(X)
+        return X.reshape(*X.shape, 1), to_categorical(y, num_classes=self.n_classes)
