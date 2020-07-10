@@ -371,7 +371,7 @@ def get_class_audio_files(TRAIN_FOLDER, classes = ['amegfi', 'amecro', 'aldfly']
 
 class DataGeneratorV2(Sequence):
     'Generates data for Keras'
-    def __init__(self, files, labels, batch_size=32,  shuffle=True, sr=22050, chunk_seconds=5, min_std=0.02):
+    def __init__(self, files, labels, batch_size=32,  shuffle=True, sr=22050, chunk_seconds=5, min_std=0.02, channel_first=False, one_hot=True):
         'Initialization'
         self.batch_size = batch_size
         self.shuffle = shuffle
@@ -380,6 +380,8 @@ class DataGeneratorV2(Sequence):
         self.audio_files = np.array(files)
         self.chunk_samples = chunk_seconds * sr
         self.min_std = min_std
+        self.channel_first = channel_first
+        self.one_hot = one_hot
         
 
         self.classes_dict = {cl:i for i, cl in enumerate(self.classes)}
@@ -416,9 +418,15 @@ class DataGeneratorV2(Sequence):
     def __data_generation(self, list_IDs_temp):
         'Generates data containing batch_size samples' # X : (n_samples, *dim, n_channels)
         # Initialization
+        if self.channel_first:
+            X = np.empty((self.batch_size, 1, self.chunk_samples))
+        else:
+            X = np.empty((self.batch_size, self.chunk_samples, 1))
         
-        X = np.empty((self.batch_size, self.chunk_samples, 1))
-        y = np.zeros((self.batch_size, self.n_classes), dtype=int)
+        if self.one_hot:
+            y = np.zeros((self.batch_size, self.n_classes), dtype=int)
+        else:
+            y = np.zeros((self.batch_size), dtype=int)
         # Generate data
         for i, ID in enumerate(list_IDs_temp):
             # Store sample
@@ -429,16 +437,14 @@ class DataGeneratorV2(Sequence):
             while std < self.min_std:
                 x, fr, to = self.sample_audio_clip(clip)
                 std = x.std()
-            
-            X[i, :, 0] = x
-            # Store class
-#             y[i] = self.classes_dict[ID.split('/')[-2]]
-#             label = self.labels[self.indexes[i]]
-#             print(ID, label, self.classes_dict[label])
-            y[i][self.classes_dict[ID.split('/')[-2]]] = 1
-#             y.append(self.classes_dict[ID.split('/')[-2]])
-#             y.append(self.classes_dict[label])
-#         X = np.array(X)
+            if self.channel_first:
+                X[i, 0, :] = x
+            else:
+                X[i, :, 0] = x
+            if self.one_hot:
+                y[i][self.classes_dict[ID.split('/')[-2]]] = 1
+            else:
+                y[i] = self.classes_dict[ID.split('/')[-2]]
         return X, y
 
 

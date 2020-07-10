@@ -1,5 +1,6 @@
 .ipynb_checkpoints/
 *.npy
 *.hdf5
+*.pth
 __pycache__/
 dataset/
