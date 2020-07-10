@@ -16,29 +16,36 @@ def get_extentions(TRAIN_FOLDER):
                 extentions.append(ext)
     return extentions
 
-def audio_to_npy(TRAIN_FOLDER, TARGET_FOLDER, extentions, classes):
-    
+def audio_to_npy(TRAIN_FOLDER, TARGET_FOLDER, extentions, classes, target_sr = 22050):
+    copied = 0
+    existing = 0
     if not os.path.exists(TARGET_FOLDER):
         os.makedirs(TARGET_FOLDER)
-    target_sr = 22050
+    
     extentions = get_extentions(TRAIN_FOLDER)
     source_filenames = glob(TRAIN_FOLDER+'**/*', recursive=True)
-    for file in source_filenames:
+    for i, file in enumerate(source_filenames):
         ext = file.split('.')[-1]
         splt = file.split('/')
         cl = splt[-2]
         name = splt[-1]
         if ext in extentions and cl in classes:
-            sound = AudioSegment.from_mp3(file)
-            sound = sound.set_frame_rate(target_sr)
-            clip = sound.get_array_of_samples()
-            clip = np.array(clip)
-            clip = (clip - clip.mean())/np.abs(clip).std()
             dst_folder = TARGET_FOLDER  + cl + '/'
             if not os.path.exists(dst_folder):
                 os.makedirs(dst_folder)
+                
             dst_file = dst_folder  + name + '.npy'
-            np.save(dst_file, clip)
+            if not os.path.exists(dst_file):
+                sound = AudioSegment.from_mp3(file)
+                sound = sound.set_frame_rate(target_sr)
+                clip = sound.get_array_of_samples()
+                clip = np.array(clip)
+                clip = (clip - clip.mean())/np.abs(clip).std()
+                np.save(dst_file, clip)
+                copied += 1
+            else:
+                existing += 1
+        print(f'\r{copied}, {existing} / {i}', end='')
 
 class DataGenerator(Sequence):
     'Generates data for Keras'
@@ -409,8 +416,9 @@ class DataGeneratorV2(Sequence):
     def __data_generation(self, list_IDs_temp):
         'Generates data containing batch_size samples' # X : (n_samples, *dim, n_channels)
         # Initialization
-        X = []
-        y = []
+        
+        X = np.empty((self.batch_size, self.chunk_samples, 1))
+        y = np.zeros((self.batch_size, self.n_classes), dtype=int)
         # Generate data
         for i, ID in enumerate(list_IDs_temp):
             # Store sample
@@ -422,12 +430,65 @@ class DataGeneratorV2(Sequence):
                 x, fr, to = self.sample_audio_clip(clip)
                 std = x.std()
             
-            X.append(x)
+            X[i, :, 0] = x
             # Store class
 #             y[i] = self.classes_dict[ID.split('/')[-2]]
-            label = self.labels[self.indexes[i]]
+#             label = self.labels[self.indexes[i]]
 #             print(ID, label, self.classes_dict[label])
-            y.append(self.classes_dict[ID.split('/')[-2]])
+            y[i][self.classes_dict[ID.split('/')[-2]]] = 1
+#             y.append(self.classes_dict[ID.split('/')[-2]])
 #             y.append(self.classes_dict[label])
-        X = np.array(X)
-        return X.reshape(*X.shape, 1), to_categorical(y, num_classes=self.n_classes)
+#         X = np.array(X)
+        return X, y
+
+
+###################
+###################
+###################
+
+from tensorflow.keras.layers import Dense, Conv1D, Input, MaxPool1D, GlobalAveragePooling1D, Activation
+from tensorflow.keras.models import Model, Sequential
+from tensorflow.keras import backend as K
+from tensorflow.keras import optimizers
+from tensorflow.keras import callbacks
+
+def get_fourier_weights(window_size):
+    frec = np.linspace(-window_size//2, window_size//2-1, window_size)
+    time = np.linspace(0, window_size-1, window_size)
+    hanning_window = np.hanning(window_size)
+
+    filters_cos = []
+    filters_sin = []
+    for i in range(window_size//2):
+        filters_cos.append(np.cos(2*np.pi*frec[i]*time/window_size))
+        filters_sin.append(np.sin(2*np.pi*frec[i]*time/window_size))
+    filters_cos = np.array(filters_cos)[::-1]*hanning_window
+    filters_sin = np.array(filters_sin)[::-1]*hanning_window
+    return filters_cos, filters_sin
+
+def set_cnn_weights(model, filters_cos, filters_sin, cos_layer='cos', sin_layer='sin'):
+    weights_cos = model.get_layer(cos_layer).get_weights()
+    weights_sin = model.get_layer(sin_layer).get_weights()
+    weights_cos[0] = np.array(filters_cos).T.reshape(*weights_cos[0].shape)
+    weights_sin[0] = np.array(filters_sin).T.reshape(*weights_sin[0].shape)
+    model.get_layer(cos_layer).set_weights(weights_cos)
+    model.get_layer(sin_layer).set_weights(weights_sin)
+    
+    
+def get_keras_fourier_model(window_size = 1024, set_fourier_weights=True, trainable=False, min_power=1e-10):
+    db_constant = 10/np.log(10)
+    kernel_size = window_size
+    stride = kernel_size//4
+    filters = kernel_size//2
+    inp = Input(shape=(None,1))
+    cos_out = Conv1D(filters, kernel_size, stride, padding='same', name = 'cos')(inp)
+    sin_out = Conv1D(filters, kernel_size, stride, padding='same', name = 'sin')(inp)
+    fourier_out = db_constant*K.log(K.square(cos_out) + K.square(sin_out) + min_power)
+    model = Model(inp, fourier_out)
+    if set_fourier_weights:
+        filters_cos, filters_sin = get_fourier_weights(window_size)
+        set_cnn_weights(model, filters_cos, filters_sin)
+    if not trainable:
+        model.get_layer('cos').trainable = False
+        model.get_layer('sin').trainable = False
+    return model, (inp, fourier_out)
