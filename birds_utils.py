@@ -506,6 +506,8 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
+
+
 class Dataset(torch.utils.data.Dataset):
     def __init__(self, list_IDs, classes, chunk_seconds, sr, min_std):
         'Initialization'
@@ -581,3 +583,59 @@ def get_pytorch_model(window_size, resnet='resnet18', pretrained=True, n_classes
         list(model.cos.parameters())[0].requires_grad = False
         list(model.sin.parameters())[0].requires_grad = False
     return model
+
+def multi_acc(y_pred, y_test):
+    y_pred_softmax = torch.log_softmax(y_pred, dim = 1)
+    _, y_pred_tags = torch.max(y_pred_softmax, dim = 1)    
+    
+    correct_pred = (y_pred_tags == y_test).float()
+    
+    return correct_pred.sum(), len(correct_pred)
+
+def validate_model_acc_loss(model, dgen_val, criterion, device):
+    #model.eval()  
+    with torch.no_grad():
+        running_loss = 0.0
+        total_ok = 0
+        total_predictions = 0
+        batches_per_epoch = len(dgen_val)
+        for i, (X, y) in enumerate(dgen_val):
+#             inputs, labels = torch.from_numpy(X).float().to(device), torch.from_numpy(y).long().to(device)
+            inputs, labels = X.to(device), y.to(device)
+            _, y_pred = model(inputs)
+            loss = criterion(y_pred, labels)
+            ok, total = multi_acc(y_pred, labels)
+            total_ok = total_ok + ok
+            running_loss = running_loss + loss
+            total_predictions = total_predictions + total
+            print(f'\r{i+1}/{batches_per_epoch} - val loss: {running_loss/(i+1)}, val acc: {total_ok/total_predictions}', end='')
+    #model.train()
+    return (running_loss/(i+1)).detach().item(), (total_ok/total_predictions).detach().item()
+
+def validate_model_loss_detail(model, dgen_val, criterion, device):
+    #model.eval()
+    Xs = []
+    losses = []
+    y_preds = []
+    ys = []
+    with torch.no_grad():
+        running_loss = 0.0
+        total_ok = 0
+        total_predictions = 0
+        batches_per_epoch = len(dgen_val)
+        for i, (X, y) in enumerate(dgen_val):
+#             inputs, labels = torch.from_numpy(X).float().to(device), torch.from_numpy(y).long().to(device)
+            Xs.append(X)
+            ys.append(y)
+            inputs, labels = X.to(device), y.to(device)
+            _, y_pred = model(inputs)
+            y_preds.append(y_pred)
+            loss = criterion(y_pred, labels)
+            losses.append(loss.detach())
+            ok, total = multi_acc(y_pred, labels)
+            total_ok = total_ok + ok
+            running_loss = running_loss + loss.mean()
+            total_predictions = total_predictions + total
+            print(f'\r{i+1}/{batches_per_epoch} - val loss: {running_loss/(i+1)}, val acc: {total_ok/total_predictions}', end='')
+    #model.train()
+    return (running_loss/(i+1)).detach().item(), (total_ok/total_predictions).detach().item(), Xs, ys, y_preds, losses
