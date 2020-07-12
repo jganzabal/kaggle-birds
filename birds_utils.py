@@ -509,13 +509,15 @@ from torch.nn import functional as F
 
 
 class Dataset(torch.utils.data.Dataset):
-    def __init__(self, list_IDs, classes, chunk_seconds, sr, min_std):
+    def __init__(self, list_IDs, classes, chunk_seconds, sr, min_std, multilabel=False):
         'Initialization'
         self.min_std = min_std
         self.list_IDs = list_IDs
         self.classes = classes
+        self.n_classes = len(classes)
         self.chunk_samples = chunk_seconds * sr
         self.classes_dict = {cl:i for i, cl in enumerate(self.classes)}
+        self.multilabel = multilabel
 
     def sample_audio_clip(self, clip):
         fr = int(np.random.rand(1)*(len(clip)-self.chunk_samples))
@@ -541,7 +543,11 @@ class Dataset(torch.utils.data.Dataset):
             std = X.std()
         # Reshape for 1 channel 1D CNN
         X = torch.from_numpy(X.reshape(1, -1)).float()
-        y = torch.tensor(self.classes_dict[ID.split('/')[-2]])
+        if self.multilabel:
+            y = torch.zeros((self.n_classes))
+            y[self.classes_dict[ID.split('/')[-2]]] = 1
+        else:
+            y = torch.tensor(self.classes_dict[ID.split('/')[-2]])
 
         return X, y
     
@@ -577,6 +583,43 @@ def get_pytorch_model(window_size, resnet='resnet18', pretrained=True, n_classes
             x = self.resnet(x)
             x = torch.flatten(x, start_dim=1)
             x = self.fc1(x)
+            return x_spec, x
+    model = Net()
+    if not train_fourier:
+        list(model.cos.parameters())[0].requires_grad = False
+        list(model.sin.parameters())[0].requires_grad = False
+    return model
+
+def get_pytorch_model_all_conv(window_size, resnet='resnet18', pretrained=True, n_classes=10, init_fourier=True, train_fourier=False):
+    window_size = 1024
+    kernel_size = window_size
+    stride = kernel_size//4
+    filters = kernel_size//2
+    
+    model_resnet = torch.hub.load('pytorch/vision:v0.6.0', resnet, pretrained=pretrained)
+    if resnet=='resnet18':
+        linear_inp = 512
+    else:
+        linear_inp = 2048
+    class Net(nn.Module):
+        def __init__(self):
+            super(Net, self).__init__()
+            self.cos = nn.Conv1d(1, filters, kernel_size, stride=stride)
+            self.sin = nn.Conv1d(1, filters, kernel_size, stride=stride)
+            if init_fourier:
+                cos_weights, sin_weights = get_fourier_weights(window_size)
+                self.cos.weight.data = torch.from_numpy(cos_weights.reshape(cos_weights.shape[0], 1, cos_weights.shape[1])).float()
+                self.sin.weight.data = torch.from_numpy(sin_weights.reshape(sin_weights.shape[0], 1, sin_weights.shape[1])).float()
+            self.resnet = nn.Sequential(*list(model_resnet.children())[:-1])
+            self.conv_out = nn.Conv2d(linear_inp, 10, 1)
+        def forward(self, x):
+            min_power=1e-10
+            x_spec = 10*torch.log10(self.cos(x)**2 + self.sin(x)**2 + min_power)
+            x_spec = (x_spec + 60)/120 - 0.5
+            x = torch.reshape(x_spec, (len(x_spec), 1, 512, -1))
+            x = torch.cat([x, x, x], dim=1)
+            x = self.resnet(x)
+            x = self.conv_out(x).flatten(start_dim=1)
             return x_spec, x
     model = Net()
     if not train_fourier:
