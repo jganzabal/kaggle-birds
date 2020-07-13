@@ -40,7 +40,7 @@ def audio_to_npy(TRAIN_FOLDER, TARGET_FOLDER, extentions, classes, target_sr = 2
                 sound = sound.set_frame_rate(target_sr)
                 clip = sound.get_array_of_samples()
                 clip = np.array(clip)
-                clip = (clip - clip.mean())/np.abs(clip).std()
+                clip = (clip - clip.mean())/clip.std()
                 np.save(dst_file, clip)
                 copied += 1
             else:
@@ -284,7 +284,7 @@ def save_class_dataset(train, dataset_folder, ebird_code, target_sr = 22050, chu
 #####
 
 from pydub.utils import mediainfo
-def get_class_audio_files_npy(TRAIN_FOLDER, classes = ['amegfi', 'amecro', 'aldfly'], min_duration=5, ratio = 0.2, extention='.npy', sr=22050):
+def get_class_audio_files_npy(TRAIN_FOLDER, classes = ['amegfi', 'amecro', 'aldfly'], min_duration=5, extention='.npy', sr=22050):
     class_audiofiles = {}
     for cl in classes:
         audio_files = []
@@ -307,7 +307,10 @@ def get_class_audio_files_npy(TRAIN_FOLDER, classes = ['amegfi', 'amecro', 'aldf
         class_audiofiles[cl] = {}
         class_audiofiles[cl]['files'] = np.array(audio_files)[indexes].reshape(-1)
         class_audiofiles[cl]['durations'] = np.array(durations)[indexes].reshape(-1)
-        
+    return class_audiofiles
+
+def split_audio_files_npy(class_audiofiles, min_duration=5, ratio = 0.2, extention='.npy', sr=22050):
+    classes = list(class_audiofiles.keys())
     train_files = []
     val_files = []
     train_labels = []
@@ -325,7 +328,29 @@ def get_class_audio_files_npy(TRAIN_FOLDER, classes = ['amegfi', 'amecro', 'aldf
                 val_labels = val_labels + [cl]*i
                 print(acc_dur/duration)
                 break
-    return class_audiofiles, train_files, val_files, train_labels, val_labels
+    return train_files, val_files, train_labels, val_labels
+
+def split_files_simple(class_audiofiles, ratio = 0.2):
+    train_files = []
+    train_labels = []
+    val_files = []
+    val_labels = []
+    for cl, v in class_audiofiles.item().items():
+        files = np.array(v['files'])
+        indexes = list(range(len(files)))
+        np.random.shuffle(indexes)
+        cut = int(ratio*len(files))
+        v_f = files[indexes[:cut]]
+        t_f = files[indexes[cut:]]
+        
+        print(cl, len(v_f)/ (len(t_f) + len(v_f)))
+        train_files = train_files + list(t_f)
+        val_files = val_files + list(v_f  )    
+        train_labels = train_labels + [cl]*len(t_f)
+        val_labels = val_labels + [cl]*len(v_f)
+        
+    print('avg: ',len(val_files)/ (len(train_files) + len(val_files)))
+    return train_files, val_files, train_labels, val_labels
 
 def get_class_audio_files(TRAIN_FOLDER, classes = ['amegfi', 'amecro', 'aldfly'], min_duration=5, ratio = 0.2):
     class_audiofiles = {}
@@ -506,18 +531,68 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
+def multilabel_metrics(y_pred, y_test, p_thres=0.5):
+    # f1_score(y.numpy(), y_pred.detach().numpy()>0, average='micro', zero_division='warn')
+    thres = -np.log(1/p_thres - 1)
+    total = len(y_pred)
+    positives = 1*(y_pred > thres)
+    TP = (positives * y_test).sum(axis=0)
+    FP = (positives * (1 - y_test)).sum(axis=0)
+    FN = ((1 - positives) * y_test).sum(axis=0)
+    micro_F1 = get_F1_micro(TP, FP, FN)
+    return TP, FP, FN, micro_F1, total
+
+def get_F1_micro(TP, FP, FN):
+    return TP.sum()/(TP.sum() + 0.5*(FP.sum() + FN.sum())).item()
+
+def validate(model, dgen_val, criterion, device, metrics_func=multilabel_metrics):
+    model.eval()  
+    with torch.no_grad():
+        running_loss = 0.0
+        TPs = 0
+        FPs = 0
+        FNs = 0
+        total_predictions = 0
+        batches_per_epoch = len(dgen_val)
+        for i, (X, y) in enumerate(dgen_val):
+            inputs, labels = X.to(device), y.to(device)
+            _, y_pred = model(inputs)
+            loss = criterion(y_pred, labels)
+            TP, FP, FN, micro_F1, total = metrics_func(y_pred, labels)
+            TPs = TPs + TP.sum()
+            FPs = FPs + FP.sum()
+            FNs = FNs + FN.sum()
+            total_predictions = total_predictions + total
+            
+            running_loss = running_loss + loss
+            
+            avg_loss = running_loss/(i+1)
+            avg_F1 = get_F1_micro(TPs, FPs, FNs)
+            avg_acc = TPs/total_predictions
+            print(f'\r{i+1}/{batches_per_epoch} - val loss: {avg_loss}, val F1 micro: {avg_F1} val acc: {avg_acc}', end='')
+    model.train()
+    return avg_loss.detach().item(), avg_F1.detach().item(), avg_acc.detach().item()
 
 
 class Dataset(torch.utils.data.Dataset):
-    def __init__(self, list_IDs, classes, chunk_seconds, sr, min_std, multilabel=False):
+    def __init__(self, list_IDs, classes, chunk_seconds, sr, min_std, multilabel=False, add_noise=False):
         'Initialization'
         self.min_std = min_std
         self.list_IDs = list_IDs
         self.classes = classes
         self.n_classes = len(classes)
+        self.sr = sr
         self.chunk_samples = chunk_seconds * sr
         self.classes_dict = {cl:i for i, cl in enumerate(self.classes)}
         self.multilabel = multilabel
+        self.add_noise = add_noise
+        
+    def get_std_thres(self, clip, seconds_to_analyze = 1):
+        samples_to_analyse = int(self.sr*seconds_to_analyze)
+        croped_audio = samples_to_analyse*(len(clip)//samples_to_analyse)
+        stds = clip[:croped_audio].reshape(-1, samples_to_analyse).std(axis=1)
+        std_thres = np.mean(stds)
+        return std_thres, np.min(stds)
 
     def sample_audio_clip(self, clip):
         fr = int(np.random.rand(1)*(len(clip)-self.chunk_samples))
@@ -536,12 +611,18 @@ class Dataset(torch.utils.data.Dataset):
 
         # Load data and get label
         clip = np.load(ID)
+        std_thres, stds_min = self.get_std_thres(clip)
         X, fr, to = self.sample_audio_clip(clip)
         std = X.std()
-        while std < self.min_std:
+        
+        
+        while std < std_thres:
             X, fr, to = self.sample_audio_clip(clip)
             std = X.std()
         # Reshape for 1 channel 1D CNN
+        if np.random.randint(2) == 1 and self.add_noise:
+            # Half of the time add white noise
+            X = X + np.random.normal(0, 1-stds_min, len(X))
         X = torch.from_numpy(X.reshape(1, -1)).float()
         if self.multilabel:
             y = torch.zeros((self.n_classes))
@@ -615,7 +696,7 @@ def get_pytorch_model_all_conv(window_size, resnet='resnet18', pretrained=True, 
         def forward(self, x):
             min_power=1e-10
             x_spec = 10*torch.log10(self.cos(x)**2 + self.sin(x)**2 + min_power)
-            x_spec = (x_spec + 60)/120 - 0.5
+            x_spec = (x_spec + 60)/120
             x = torch.reshape(x_spec, (len(x_spec), 1, 512, -1))
             x = torch.cat([x, x, x], dim=1)
             x = self.resnet(x)
