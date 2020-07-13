@@ -619,17 +619,25 @@ class Dataset(torch.utils.data.Dataset):
         while std < std_thres:
             X, fr, to = self.sample_audio_clip(clip)
             std = X.std()
-        # Reshape for 1 channel 1D CNN
+        
+        # Add random noise half of the time
         if np.random.randint(2) == 1 and self.add_noise:
             # Half of the time add white noise
             X = X + np.random.normal(0, 1-stds_min, len(X))
+        
+        # Reshape for 1 channel 1D CNN (channel first)
         X = torch.from_numpy(X.reshape(1, -1)).float()
-        if self.multilabel:
-            y = torch.zeros((self.n_classes))
+        
+        # only noise 1/n_classes
+        if np.random.rand()<1/self.n_classes and self.add_noise:
+            y = torch.zeros(self.n_classes)
+            X = torch.from_numpy(np.random.normal(0, 1, X.shape)).float()
+        elif self.multilabel:
+            y = torch.zeros(self.n_classes)
             y[self.classes_dict[ID.split('/')[-2]]] = 1
         else:
             y = torch.tensor(self.classes_dict[ID.split('/')[-2]])
-
+        
         return X, y
     
     
