@@ -573,10 +573,12 @@ def validate(model, dgen_val, criterion, device, metrics_func=multilabel_metrics
     model.train()
     return avg_loss.detach().item(), avg_F1.detach().item(), avg_acc.detach().item()
 
+from birds_filters import get_ambient_noise
 
 class Dataset(torch.utils.data.Dataset):
-    def __init__(self, list_IDs, classes, chunk_seconds, sr, min_std, multilabel=False, add_noise=False):
+    def __init__(self, list_IDs, classes, chunk_seconds, sr, min_std, multilabel=False, add_noise=False, add_ambient_noise=False):
         'Initialization'
+        self.add_ambient_noise = add_ambient_noise
         self.min_std = min_std
         self.list_IDs = list_IDs
         self.classes = classes
@@ -637,7 +639,11 @@ class Dataset(torch.utils.data.Dataset):
             y[self.classes_dict[ID.split('/')[-2]]] = 1
         else:
             y = torch.tensor(self.classes_dict[ID.split('/')[-2]])
-        
+            
+        if np.random.randint(2) == 1 and self.add_ambient_noise:
+            ambient_noise = get_ambient_noise(X.shape[1], self.sr)
+            if not np.isnan(ambient_noise.sum()):
+                X = X + torch.from_numpy(ambient_noise.reshape(1, -1)).float()
         return X, y
     
     
