@@ -21,10 +21,11 @@ def audio_to_npy(TRAIN_FOLDER, TARGET_FOLDER, extentions, classes, target_sr = 2
     existing = 0
     if not os.path.exists(TARGET_FOLDER):
         os.makedirs(TARGET_FOLDER)
-    
+    errors = 0
     extentions = get_extentions(TRAIN_FOLDER)
     source_filenames = glob(TRAIN_FOLDER+'**/*', recursive=True)
     for i, file in enumerate(source_filenames):
+        print(f'\rcopied:{copied}, existing:{existing} / total:{i}, {file}, errors: {errors}', end='')
         ext = file.split('.')[-1]
         splt = file.split('/')
         cl = splt[-2]
@@ -36,16 +37,20 @@ def audio_to_npy(TRAIN_FOLDER, TARGET_FOLDER, extentions, classes, target_sr = 2
                 
             dst_file = dst_folder  + name + '.npy'
             if not os.path.exists(dst_file):
-                sound = AudioSegment.from_mp3(file)
-                sound = sound.set_frame_rate(target_sr)
-                clip = sound.get_array_of_samples()
-                clip = np.array(clip)
-                clip = (clip - clip.mean())/clip.std()
-                np.save(dst_file, clip)
-                copied += 1
+                try:
+                    sound = AudioSegment.from_mp3(file)
+                    sound = sound.set_frame_rate(target_sr)
+                    clip = sound.get_array_of_samples()
+                    clip = np.array(clip)
+                    clip = (clip - clip.mean())/clip.std()
+                    np.save(dst_file, clip)
+                    copied += 1
+                except:
+                    errors += 1
+                    print('Error with file:', file)
             else:
                 existing += 1
-        print(f'\r{copied}, {existing} / {i}', end='')
+        
 
 class DataGenerator(Sequence):
     'Generates data for Keras'
