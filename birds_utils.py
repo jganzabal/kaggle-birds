@@ -16,41 +16,66 @@ def get_extentions(TRAIN_FOLDER):
                 extentions.append(ext)
     return extentions
 
-def audio_to_npy(TRAIN_FOLDER, TARGET_FOLDER, extentions, classes, target_sr = 22050):
+def get_std_stats(clip, sr, seconds_to_analyze = 1):
+    samples_to_analyse = int(sr*seconds_to_analyze)
+    croped_audio = samples_to_analyse*(len(clip)//samples_to_analyse)
+    stds = clip[:croped_audio].reshape(-1, samples_to_analyse).std(axis=1)
+    return np.max(stds), np.mean(stds), np.min(stds)
+
+def mp3_to_samples(file, target_sr=22050):
+    sound = AudioSegment.from_mp3(file)
+    sound = sound.set_frame_rate(target_sr)
+    clip = sound.get_array_of_samples()
+    clip = np.array(clip)
+    clip = (clip - clip.mean())/clip.std()
+    return clip
+
+def audio_to_file(TRAIN_FOLDER, TARGET_FOLDER, extentions, classes, target_sr = 22050, binary=True, files_data={}):
     copied = 0
     existing = 0
+    errors = 0
     if not os.path.exists(TARGET_FOLDER):
         os.makedirs(TARGET_FOLDER)
-    errors = 0
+    
     extentions = get_extentions(TRAIN_FOLDER)
     source_filenames = glob(TRAIN_FOLDER+'**/*', recursive=True)
     for i, file in enumerate(source_filenames):
-        print(f'\rcopied:{copied}, existing:{existing} / total:{i}, {file}, errors: {errors}', end='')
         ext = file.split('.')[-1]
         splt = file.split('/')
         cl = splt[-2]
         name = splt[-1]
         if ext in extentions and cl in classes:
+            print(f'\rcopied:{copied}, existing:{existing} / total:{i}, {file}, errors: {errors}', end='')
             dst_folder = TARGET_FOLDER  + cl + '/'
             if not os.path.exists(dst_folder):
                 os.makedirs(dst_folder)
-                
-            dst_file = dst_folder  + name + '.npy'
-            if not os.path.exists(dst_file):
+            
+            if binary:
+                dst_file = dst_folder  + name + '.bin'
+            else:
+                dst_file = dst_folder  + name + '.npy'
+            if not os.path.exists(dst_file) and (dst_file not in files_data):
                 try:
-                    sound = AudioSegment.from_mp3(file)
-                    sound = sound.set_frame_rate(target_sr)
-                    clip = sound.get_array_of_samples()
-                    clip = np.array(clip)
-                    clip = (clip - clip.mean())/clip.std()
-                    np.save(dst_file, clip)
+                    clip = mp3_to_samples(file, target_sr=target_sr)
+                    std_max, std_mean, std_min = get_std_stats(clip, target_sr)
+                    files_data[dst_file] = {}
+                    files_data[dst_file]['std_max'] = std_max
+                    files_data[dst_file]['std_mean'] = std_mean
+                    files_data[dst_file]['std_min'] = std_min
+                    files_data[dst_file]['size'] = len(clip)
+                    if binary:
+                        f = open(dst_file, 'wb')
+                        f.write(clip.tobytes())
+                        f.close()
+                    else:
+                        np.save(dst_file, clip)
                     copied += 1
                 except:
                     errors += 1
                     print('Error with file:', file)
             else:
                 existing += 1
-        
+    return files_data
 
 class DataGenerator(Sequence):
     'Generates data for Keras'
@@ -289,7 +314,7 @@ def save_class_dataset(train, dataset_folder, ebird_code, target_sr = 22050, chu
 #####
 
 from pydub.utils import mediainfo
-def get_class_audio_files_npy(TRAIN_FOLDER, classes = ['amegfi', 'amecro', 'aldfly'], min_duration=5, extention='.npy', sr=22050):
+def get_class_audio_files_npy(TRAIN_FOLDER, classes = ['amegfi', 'amecro', 'aldfly'], min_duration=5, extention='.npy', sr=22050, durations=False):
     class_audiofiles = {}
     for cl in classes:
         audio_files = []
@@ -299,13 +324,15 @@ def get_class_audio_files_npy(TRAIN_FOLDER, classes = ['amegfi', 'amecro', 'aldf
         duration = 0
         for file in cl_audio_files:
             filename = file.split('/')[-1]
-            
-            if extention in filename:
-                clip = np.load(file)
-                duration = len(clip)/sr
-                if duration>=min_duration:
-                    durations.append(duration)
-                    audio_files.append(file)
+            if duration:
+                if extention in filename:
+                    clip = np.load(file)
+                    duration = len(clip)/sr
+                    if duration>=min_duration:
+                        durations.append(duration)
+                        audio_files.append(file)
+            else:
+                audio_files.append(file)
 
         audio_files = np.array(audio_files) 
         indexes = np.random.shuffle(list(range(len(audio_files))))
@@ -340,11 +367,11 @@ def split_files_simple(class_audiofiles, ratio = 0.2):
     train_labels = []
     val_files = []
     val_labels = []
-    for cl, v in class_audiofiles.item().items():
+    for cl, v in class_audiofiles.items():
         files = np.array(v['files'])
         indexes = list(range(len(files)))
         np.random.shuffle(indexes)
-        cut = int(ratio*len(files))
+        cut = int(ratio*len(files) + 0.5)
         v_f = files[indexes[:cut]]
         t_f = files[indexes[cut:]]
         
@@ -581,8 +608,9 @@ def validate(model, dgen_val, criterion, device, metrics_func=multilabel_metrics
 from birds_filters import get_ambient_noise
 
 class Dataset(torch.utils.data.Dataset):
-    def __init__(self, list_IDs, classes, chunk_seconds, sr, min_std, multilabel=False, add_noise=False, add_ambient_noise=False):
+    def __init__(self, list_IDs, classes, std_stats, chunk_seconds, sr, min_std, multilabel=False, add_noise=False, add_ambient_noise=False):
         'Initialization'
+        self.std_stats = std_stats
         self.add_ambient_noise = add_ambient_noise
         self.min_std = min_std
         self.list_IDs = list_IDs
@@ -593,13 +621,7 @@ class Dataset(torch.utils.data.Dataset):
         self.classes_dict = {cl:i for i, cl in enumerate(self.classes)}
         self.multilabel = multilabel
         self.add_noise = add_noise
-        
-    def get_std_thres(self, clip, seconds_to_analyze = 1):
-        samples_to_analyse = int(self.sr*seconds_to_analyze)
-        croped_audio = samples_to_analyse*(len(clip)//samples_to_analyse)
-        stds = clip[:croped_audio].reshape(-1, samples_to_analyse).std(axis=1)
-        std_thres = np.mean(stds)
-        return std_thres, np.min(stds)
+        self.chunk_seconds = chunk_seconds
 
     def sample_audio_clip(self, clip):
         fr = int(np.random.rand(1)*(len(clip)-self.chunk_samples))
@@ -611,22 +633,50 @@ class Dataset(torch.utils.data.Dataset):
         'Denotes the total number of samples'
         return len(self.list_IDs)
 
+    def get_normal_noise(self, std=1):
+        y = torch.zeros(self.n_classes)
+        X = torch.from_numpy(np.random.normal(0, std, (1, self.chunk_samples))).float()
+        return X, y
+    
     def __getitem__(self, index):
         'Generates one sample of data'
         # Select sample
         ID = self.list_IDs[index]
-
+        if ID not in self.std_stats:
+            return self.get_normal_noise()
+        
+        file_stats = self.std_stats[ID]
+        std_thres = file_stats['std_mean']
+        stds_min = file_stats['std_min']
+        audio_size = file_stats['size']
+        
+        # File to short return random noise
+        if audio_size < self.chunk_samples:
+            return self.get_normal_noise()
+        
         # Load data and get label
-        clip = np.load(ID)
-        std_thres, stds_min = self.get_std_thres(clip)
-        X, fr, to = self.sample_audio_clip(clip)
+        X = get_audio_chunk(ID, audio_size, duration=self.chunk_seconds, sr=self.sr, bytes_per_sample=8)
         std = X.std()
         
+        if len(X) == 0:
+            return self.get_normal_noise()
         
-        while std < std_thres:
-            X, fr, to = self.sample_audio_clip(clip)
-            std = X.std()
-        
+        n_tries = 0
+        max_tries = 10
+#         print('_________')
+#         print(std)
+        while (std < std_thres) and (n_tries<max_tries):
+            n_tries += 1
+            new_X = get_audio_chunk(ID, audio_size, duration=self.chunk_seconds, sr=self.sr, bytes_per_sample=8)
+            new_std = new_X.std()
+#             print(new_std)
+            if new_std>std:
+                std = new_std
+                X = new_X
+#         print('best:', X.std())
+            
+#         if n_tries == max_tries:
+#             print('n_tries exceed!')
         # Add random noise half of the time
         if np.random.randint(2) == 1 and self.add_noise:
             # Half of the time add white noise
@@ -651,6 +701,161 @@ class Dataset(torch.utils.data.Dataset):
                 X = X + torch.from_numpy(ambient_noise.reshape(1, -1)).float()
         return X, y
     
+class DatasetSequence(Sequence):
+    def __init__(self, audio_files, classes, batch_size=32, chunk_seconds=5, sr=22050, min_std=0.5, multilabel=False, add_noise=False, add_ambient_noise=False):
+        'Initialization'
+        self.add_ambient_noise = add_ambient_noise
+        self.min_std = min_std
+        self.audio_files = np.array(audio_files)
+        self.classes = classes
+        self.n_classes = len(classes)
+        self.sr = sr
+        self.chunk_samples = chunk_seconds * sr
+        self.classes_dict = {cl:i for i, cl in enumerate(self.classes)}
+        self.multilabel = multilabel
+        self.add_noise = add_noise
+        self.batch_size = batch_size
+        self.shuffle = True
+        self.on_epoch_end()
+        
+    def get_std_thres(self, clip, seconds_to_analyze = 1):
+        samples_to_analyse = int(self.sr*seconds_to_analyze)
+        croped_audio = samples_to_analyse*(len(clip)//samples_to_analyse)
+        stds = clip[:croped_audio].reshape(-1, samples_to_analyse).std(axis=1)
+        std_thres = np.mean(stds)
+        return std_thres, np.min(stds)
+
+    def sample_audio_clip(self, clip):
+        fr = int(np.random.rand(1)*(len(clip)-self.chunk_samples))
+        to = fr + self.chunk_samples
+        x = clip[fr:to]
+        return x, fr, to
+    
+    def __len__(self):
+        'Denotes the number of batches per epoch'
+        return int(np.floor(len(self.audio_files) / self.batch_size)) + 1
+
+    def __getitem__(self, index):
+        'Generate one batch of data'
+        # Generate indexes of the batch
+        indexes = self.indexes[index*self.batch_size:(index+1)*self.batch_size]
+
+        # Generate data
+        X, y = self.__data_generation(self.audio_files[indexes])
+
+        return X, y
+    
+    def on_epoch_end(self):
+        'Updates indexes after each epoch'
+        self.indexes = np.arange(len(self.audio_files))
+        if self.shuffle == True:
+            np.random.shuffle(self.indexes)
+    
+    def get_Xy(self, ID):
+        clip = np.load(ID)
+        if len(clip) < self.chunk_samples:
+            y = torch.zeros(self.n_classes)
+            X = torch.from_numpy(np.random.normal(0, 1, (1, self.chunk_samples))).float()
+            return X, y
+
+        std_thres, stds_min = self.get_std_thres(clip)
+        X, fr, to = self.sample_audio_clip(clip)
+        std = X.std()
+
+
+        while std < std_thres:
+            X, fr, to = self.sample_audio_clip(clip)
+            std = X.std()
+
+        # Add random noise half of the time
+        if np.random.randint(2) == 1 and self.add_noise:
+            # Half of the time add white noise
+            X = X + np.random.normal(0, 1-stds_min, len(X))
+
+        # Reshape for 1 channel 1D CNN (channel first)
+        X = torch.from_numpy(X.reshape(1, -1)).float()
+
+        # only noise 1/n_classes
+        if np.random.rand()<1/self.n_classes and self.add_noise:
+            y = torch.zeros(self.n_classes)
+            X = torch.from_numpy(np.random.normal(0, 1, X.shape)).float()
+        elif self.multilabel:
+            y = torch.zeros(self.n_classes)
+            y[self.classes_dict[ID.split('/')[-2]]] = 1
+        else:
+            y = torch.tensor(self.classes_dict[ID.split('/')[-2]])
+
+        if np.random.randint(2) == 1 and self.add_ambient_noise:
+            ambient_noise = get_ambient_noise(X.shape[1], self.sr)
+            if not np.isnan(ambient_noise.sum()):
+                X = X + torch.from_numpy(ambient_noise.reshape(1, -1)).float()
+        return X, y
+    
+    def __data_generation(self, list_IDs):
+        'Generates one sample of data'
+        # Select sample
+        X_vect = torch.empty((len(list_IDs), 1, self.chunk_samples))
+        y_vect = torch.zeros((len(list_IDs), self.n_classes))
+            
+        for i, ID in enumerate(list_IDs):
+            X, y = self.get_Xy(ID)
+            X_vect[i] = X
+            y_vect[i] = y
+        return X_vect, y_vect
+            
+
+class FakeDataset(torch.utils.data.Dataset):
+    def create_dict(self):
+        self.train_class = {}
+        for file in self.list_IDs:
+            cl = file.split('/')[-2]
+            if cl not in train_class:
+                train_class[cl] = []
+            self.train_class[cl].append(file)
+        self.classes = list(self.train_class.keys())
+        self.classes_dict = {cl:i for i, cl in enumerate(self.classes)}
+        
+    
+    def load_files(self):
+        self.epoch_data = []
+        N = len(train_class)
+        for i, cl in enumerate(self.classes):
+            v = self.train_class[cl]
+            file = v[np.random.randint(len(v))]
+            self.epoch_data.append(np.load(file))
+            print(f'\r{i+1}/{N}', end='')
+    
+    def __init__(self, list_IDs, n_classes, chunk_seconds, sr):
+        'Initialization'
+        self.n_classes = n_classes
+        self.sr = sr
+        self.chunk_samples = chunk_seconds * sr
+        self.list_IDs = list_IDs
+        self.create_dict()
+        self.iteration = 0
+    
+    def __len__(self):
+        'Denotes the total number of samples'
+        return self.n_classes
+
+    def __getitem__(self, index):
+        if (self.iteration % 10*self.n_classes) == 0:
+            self.load_files()
+            self.iteration = -1
+        self.iteration += 1
+        'Generates one sample of data'
+        clip = self.epoch_data[index][:self.chunk_samples]
+        if len(clip) < self.chunk_samples:
+            y = torch.zeros(self.n_classes)
+            X = torch.from_numpy(np.random.normal(0, 1, (1, self.chunk_samples))).float()
+            return X, y
+        
+        y = torch.zeros(self.n_classes)
+        y[index] = 1
+        X = torch.from_numpy(clip.reshape(1, -1)).float()
+        
+        
+        return X, y
     
 def get_pytorch_model(window_size, resnet='resnet18', pretrained=True, n_classes=10, init_fourier=True, train_fourier=False):
     window_size = 1024
@@ -711,7 +916,7 @@ def get_pytorch_model_all_conv(window_size, resnet='resnet18', pretrained=True, 
                 self.cos.weight.data = torch.from_numpy(cos_weights.reshape(cos_weights.shape[0], 1, cos_weights.shape[1])).float()
                 self.sin.weight.data = torch.from_numpy(sin_weights.reshape(sin_weights.shape[0], 1, sin_weights.shape[1])).float()
             self.resnet = nn.Sequential(*list(model_resnet.children())[:-1])
-            self.conv_out = nn.Conv2d(linear_inp, 10, 1)
+            self.conv_out = nn.Conv2d(linear_inp, n_classes, 1)
         def forward(self, x):
             min_power=1e-10
             x_spec = 10*torch.log10(self.cos(x)**2 + self.sin(x)**2 + min_power)
@@ -782,3 +987,41 @@ def validate_model_loss_detail(model, dgen_val, criterion, device):
             print(f'\r{i+1}/{batches_per_epoch} - val loss: {running_loss/(i+1)}, val acc: {total_ok/total_predictions}', end='')
     #model.train()
     return (running_loss/(i+1)).detach().item(), (total_ok/total_predictions).detach().item(), Xs, ys, y_preds, losses
+
+
+def get_audio_chunk(filename, size, duration=5, sr=22050, bytes_per_sample=8):
+    chunk_samples = duration*sr
+    f = open(filename, 'rb')
+    # size = os.fstat(f.fileno()).st_size // bytes_per_sample
+    if chunk_samples == size:
+        start = 0
+    else:
+        start = np.random.randint(size - chunk_samples)
+    
+    f.seek(start*bytes_per_sample)
+    audio_chunk = np.frombuffer(f.read(chunk_samples*bytes_per_sample))
+    f.close()
+    if len(audio_chunk) != chunk_samples:
+        print(filename)
+        return np.array([])
+    return audio_chunk.copy()
+
+def get_bin_audio(filename):
+    f = open(filename, 'rb')
+    audio = np.frombuffer(f.read())
+    f.close()
+    return audio
+
+def fix_corrupted_files(files_data, TRAIN_FOLDER, target_sr=22050):
+    corrupted_files = []
+    for i, filename in enumerate(files_data.keys()):
+        audio = get_audio_chunk(filename, files_data[filename]['size'], duration=1)
+        if len(audio) == 0:
+            corrupted_files.append(filename)
+        print(f'\r{i}', end='')
+
+    for filename in corrupted_files:
+        clip = mp3_to_samples(TRAIN_FOLDER +  '/'.join(filename.split('/')[-2:]).replace('.bin', ''), target_sr=22050)
+        f = open(filename, 'wb')
+        f.write(clip.tobytes())
+        f.close()
