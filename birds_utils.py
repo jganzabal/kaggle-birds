@@ -4,6 +4,9 @@ import numpy as np
 from glob import glob
 from shutil import copyfile
 import os
+import librosa
+import warnings
+warnings.filterwarnings('ignore')
 
 def get_extentions(TRAIN_FOLDER):
     source_filenames = glob(TRAIN_FOLDER+'**/*', recursive=True)
@@ -22,15 +25,20 @@ def get_std_stats(clip, sr, seconds_to_analyze = 1):
     stds = clip[:croped_audio].reshape(-1, samples_to_analyse).std(axis=1)
     return np.max(stds), np.mean(stds), np.min(stds)
 
-def mp3_to_samples(file, target_sr=22050):
-    sound = AudioSegment.from_mp3(file)
-    sound = sound.set_frame_rate(target_sr)
-    clip = sound.get_array_of_samples()
-    clip = np.array(clip)
+def mp3_to_samples(file, target_sr=22050, pydub=True, res_type='kaiser_fast'):
+    if pydub:
+        sound = AudioSegment.from_mp3(file)
+        sound = sound.set_frame_rate(target_sr)
+        clip = sound.get_array_of_samples()
+        clip = np.array(clip)
+    else:
+        clip, sr = librosa.load(file, sr=target_sr, res_type=res_type)
+        clip = clip.astype('float64')
+        
     clip = (clip - clip.mean())/clip.std()
     return clip
 
-def audio_to_file(TRAIN_FOLDER, TARGET_FOLDER, extentions, classes, target_sr = 22050, binary=True, files_data={}):
+def audio_to_file(TRAIN_FOLDER, TARGET_FOLDER, extentions, classes, target_sr = 22050, binary=True, files_data={}, pydub=True, res_type='kaiser_fast'):
     copied = 0
     existing = 0
     errors = 0
@@ -56,7 +64,7 @@ def audio_to_file(TRAIN_FOLDER, TARGET_FOLDER, extentions, classes, target_sr = 
                 dst_file = dst_folder  + name + '.npy'
             if not os.path.exists(dst_file) and (dst_file not in files_data):
                 try:
-                    clip = mp3_to_samples(file, target_sr=target_sr)
+                    clip = mp3_to_samples(file, target_sr=target_sr, pydub=pydub, res_type=res_type)
                     std_max, std_mean, std_min = get_std_stats(clip, target_sr)
                     files_data[dst_file] = {}
                     files_data[dst_file]['std_max'] = std_max
@@ -65,7 +73,10 @@ def audio_to_file(TRAIN_FOLDER, TARGET_FOLDER, extentions, classes, target_sr = 
                     files_data[dst_file]['size'] = len(clip)
                     if binary:
                         f = open(dst_file, 'wb')
-                        f.write(clip.tobytes())
+                        bytes_copied = f.write(clip.tobytes())
+                        if bytes_copied != len(clip)*8:
+                            print('Error en la copia!!!!')
+                        f.flush()
                         f.close()
                     else:
                         np.save(dst_file, clip)
@@ -243,29 +254,29 @@ from pydub import AudioSegment
 FOLDER = '/home/usuario/birds/birdsong-recognition/'
 TRAIN_FOLDER = FOLDER + 'train_audio/'
 
-def get_train_clip(dataframe, resample=None, chunk_size = None):
-    if type(dataframe) in [str, np.str_]:
-        filename = dataframe
-    else:
-        filename = TRAIN_FOLDER+dataframe['ebird_code']+'/'+dataframe['filename']
-    sound = AudioSegment.from_mp3(filename)
-    orig_sr = sound.frame_rate
-    if resample is not None:
-        sound = sound.set_frame_rate(resample)
-    else:
-        resample = orig_sr
-    clip = sound.get_array_of_samples()
-    duration = sound.duration_seconds
+# def get_train_clip(dataframe, resample=None, chunk_size = None):
+#     if type(dataframe) in [str, np.str_]:
+#         filename = dataframe
+#     else:
+#         filename = TRAIN_FOLDER+dataframe['ebird_code']+'/'+dataframe['filename']
+#     sound = AudioSegment.from_mp3(filename)
+#     orig_sr = sound.frame_rate
+#     if resample is not None:
+#         sound = sound.set_frame_rate(resample)
+#     else:
+#         resample = orig_sr
+#     clip = sound.get_array_of_samples()
+#     duration = sound.duration_seconds
     
-    if chunk_size is not None:
-        fr = int(np.random.rand(1)*(duration-chunk_size) * resample)
-        to = fr + chunk_size * resample
-        clip = np.array(clip)[fr:to]
-    else:
-        clip = np.array(clip)
+#     if chunk_size is not None:
+#         fr = int(np.random.rand(1)*(duration-chunk_size) * resample)
+#         to = fr + chunk_size * resample
+#         clip = np.array(clip)[fr:to]
+#     else:
+#         clip = np.array(clip)
         
-    clip = (clip - clip.mean())/np.abs(clip).std()
-    return clip, orig_sr, duration
+#     clip = (clip - clip.mean())/np.abs(clip).std()
+#     return clip, orig_sr, duration
 
 
 def sound_slice(x, sr = 22050, chunk_seconds=5, hop_seconds=1, discard_last=True):
@@ -282,32 +293,32 @@ def sound_slice(x, sr = 22050, chunk_seconds=5, hop_seconds=1, discard_last=True
             
     return chunks
 
-def save_chunks(ebird_folder, dataframe_row, target_sr = 22050, chunk_seconds=5, hop_seconds=1, std_thres = 0.1, save = True, discard_last=True):
-    under_tres = []
-    x, orig_sr, duration = get_train_clip(dataframe_row, target_sr)
-    chunks = sound_slice(x, sr = target_sr, chunk_seconds=chunk_seconds, hop_seconds=hop_seconds, discard_last=True)
+# def save_chunks(ebird_folder, dataframe_row, target_sr = 22050, chunk_seconds=5, hop_seconds=1, std_thres = 0.1, save = True, discard_last=True):
+#     under_tres = []
+#     x, orig_sr, duration = get_train_clip(dataframe_row, target_sr)
+#     chunks = sound_slice(x, sr = target_sr, chunk_seconds=chunk_seconds, hop_seconds=hop_seconds, discard_last=True)
 
-    for j, chunk in enumerate(chunks):
-        chunk_std = chunk.std()
+#     for j, chunk in enumerate(chunks):
+#         chunk_std = chunk.std()
 
-        if chunk_std > std_thres:
-            if save:
-                file_to_save = ebird_folder + ''.join(dataframe_row['filename'].split('.')[:-1]) + f'_{j+1}_{chunk_seconds}_{hop_seconds}.npy'
-                print(f'\r{j} - {file_to_save}', end='')
-                if not os.path.exists(file_to_save):
-                    np.save(file_to_save, chunk)
+#         if chunk_std > std_thres:
+#             if save:
+#                 file_to_save = ebird_folder + ''.join(dataframe_row['filename'].split('.')[:-1]) + f'_{j+1}_{chunk_seconds}_{hop_seconds}.npy'
+#                 print(f'\r{j} - {file_to_save}', end='')
+#                 if not os.path.exists(file_to_save):
+#                     np.save(file_to_save, chunk)
 
-        else:
-            under_tres.append(chunk)
+#         else:
+#             under_tres.append(chunk)
 
-def save_class_dataset(train, dataset_folder, ebird_code, target_sr = 22050, chunk_seconds=5, hop_seconds=1, std_thres = 0.1, discard_last=True):
-    dataframe = train[train['ebird_code']==ebird_code]
-    ebird_folder = dataset_folder + ebird_code + '/'
-    if not os.path.exists(ebird_folder):
-        os.makedirs(ebird_folder)
-    for i in range(len(dataframe)): 
-        dataframe_row = dataframe.iloc[i]
-        save_chunks(ebird_folder, dataframe_row, target_sr = target_sr, chunk_seconds=chunk_seconds, hop_seconds=hop_seconds, std_thres = std_thres, discard_last=discard_last)
+# def save_class_dataset(train, dataset_folder, ebird_code, target_sr = 22050, chunk_seconds=5, hop_seconds=1, std_thres = 0.1, discard_last=True):
+#     dataframe = train[train['ebird_code']==ebird_code]
+#     ebird_folder = dataset_folder + ebird_code + '/'
+#     if not os.path.exists(ebird_folder):
+#         os.makedirs(ebird_folder)
+#     for i in range(len(dataframe)): 
+#         dataframe_row = dataframe.iloc[i]
+#         save_chunks(ebird_folder, dataframe_row, target_sr = target_sr, chunk_seconds=chunk_seconds, hop_seconds=hop_seconds, std_thres = std_thres, discard_last=discard_last)
         
         
         
@@ -989,20 +1000,21 @@ def validate_model_loss_detail(model, dgen_val, criterion, device):
     return (running_loss/(i+1)).detach().item(), (total_ok/total_predictions).detach().item(), Xs, ys, y_preds, losses
 
 
-def get_audio_chunk(filename, size, duration=5, sr=22050, bytes_per_sample=8):
+def get_audio_chunk(filename, size, duration=5, sr=22050, bytes_per_sample=8, start=None):
     chunk_samples = duration*sr
     f = open(filename, 'rb')
     # size = os.fstat(f.fileno()).st_size // bytes_per_sample
-    if chunk_samples == size:
-        start = 0
-    else:
-        start = np.random.randint(size - chunk_samples)
+    if start is None:
+        if chunk_samples == size:
+            start = 0
+        else:
+            start = np.random.randint(size - chunk_samples)
     
     f.seek(start*bytes_per_sample)
     audio_chunk = np.frombuffer(f.read(chunk_samples*bytes_per_sample))
     f.close()
     if len(audio_chunk) != chunk_samples:
-        print(filename)
+        print(filename, start, chunk_samples, len(audio_chunk))
         return np.array([])
     return audio_chunk.copy()
 
@@ -1012,16 +1024,19 @@ def get_bin_audio(filename):
     f.close()
     return audio
 
-def fix_corrupted_files(files_data, TRAIN_FOLDER, target_sr=22050):
+def fix_corrupted_files(files_data, TRAIN_FOLDER, target_sr=22050, pydub=True, res_type='kaiser_fast'):
     corrupted_files = []
+    duration = 1
     for i, filename in enumerate(files_data.keys()):
-        audio = get_audio_chunk(filename, files_data[filename]['size'], duration=1)
+        size = files_data[filename]['size']
+        audio = get_audio_chunk(filename, size, duration=duration, sr=target_sr, start=size-duration*target_sr)
         if len(audio) == 0:
+            print(filename, 'fixed')
             corrupted_files.append(filename)
         print(f'\r{i}', end='')
 
     for filename in corrupted_files:
-        clip = mp3_to_samples(TRAIN_FOLDER +  '/'.join(filename.split('/')[-2:]).replace('.bin', ''), target_sr=22050)
+        clip = mp3_to_samples(TRAIN_FOLDER +  '/'.join(filename.split('/')[-2:]).replace('.bin', ''), target_sr=target_sr, pydub=pydub, res_type=res_type)
         f = open(filename, 'wb')
         f.write(clip.tobytes())
         f.close()
