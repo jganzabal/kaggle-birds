@@ -32,7 +32,17 @@ def mp3_to_samples(file, target_sr=22050, res_type='kaiser_fast'):
     clip = (clip - clip.mean())/clip.std()
     return clip
 
-def audio_to_file(TRAIN_FOLDER, TARGET_FOLDER, extentions, classes, target_sr = 22050, binary=True, files_data={}, pydub=True, res_type='kaiser_fast'):
+def audio_to_file(TRAIN_FOLDER, TARGET_FOLDER, extentions, classes, target_sr = 22050, binary=True, files_data={}, pydub=True, res_type='kaiser_fast', binary_type = 'float64'):
+    # binary_type float is 64 bits in python and numpy, in pytorch float is 32 bits
+    if binary_type in ['float64', float]:
+        bytes_per_sample = 8
+    elif binary_type == 'float32':
+        bytes_per_sample = 4
+    else:
+        print('Binary typt not supported')
+        return
+    
+
     copied = 0
     existing = 0
     errors = 0
@@ -67,8 +77,8 @@ def audio_to_file(TRAIN_FOLDER, TARGET_FOLDER, extentions, classes, target_sr = 
                     files_data[dst_file]['size'] = len(clip)
                     if binary:
                         f = open(dst_file, 'wb')
-                        bytes_copied = f.write(clip.tobytes())
-                        if bytes_copied != len(clip)*8:
+                        bytes_copied = f.write(clip.astype(binary_type).tobytes())
+                        if bytes_copied != len(clip)*bytes_per_sample:
                             print('Error en la copia!!!!')
 #                         f.flush()
                         f.close()
@@ -616,8 +626,9 @@ def validate(model, dgen_val, criterion, device, metrics_func=multilabel_metrics
 from birds_filters import get_ambient_noise
 
 class Dataset(torch.utils.data.Dataset):
-    def __init__(self, list_IDs, classes, std_stats, chunk_seconds, sr, min_std, multilabel=False, add_noise=False, add_ambient_noise=False, max_tries = 10):
+    def __init__(self, list_IDs, classes, std_stats, chunk_seconds, bytes_per_sample, sr, min_std, multilabel=False, add_noise=False, add_ambient_noise=False, max_tries = 10):
         'Initialization'
+        self.bytes_per_sample = bytes_per_sample
         self.std_stats = std_stats
         self.add_ambient_noise = add_ambient_noise
         self.min_std = min_std
@@ -676,7 +687,7 @@ class Dataset(torch.utils.data.Dataset):
             return self.get_normal_noise()
         
         # Load data and get label
-        X = get_audio_chunk(ID, audio_size, duration=self.chunk_seconds, sr=self.sr, bytes_per_sample=8)
+        X = get_audio_chunk(ID, audio_size, self.bytes_per_sample, duration=self.chunk_seconds, sr=self.sr)
         std = X.std()
         
         if len(X) == 0:
@@ -688,7 +699,7 @@ class Dataset(torch.utils.data.Dataset):
 
         while (std < std_thres) and (n_tries<self.max_tries):
             n_tries += 1
-            new_X = get_audio_chunk(ID, audio_size, duration=self.chunk_seconds, sr=self.sr, bytes_per_sample=8)
+            new_X = get_audio_chunk(ID, audio_size, self.bytes_per_sample, duration=self.chunk_seconds, sr=self.sr)
             new_std = new_X.std()
             if new_std>std:
                 std = new_std
@@ -1010,7 +1021,7 @@ def validate_model_loss_detail(model, dgen_val, criterion, device):
     return (running_loss/(i+1)).detach().item(), (total_ok/total_predictions).detach().item(), Xs, ys, y_preds, losses
 
 
-def get_audio_chunk(filename, size, duration=5, sr=22050, bytes_per_sample=8, start=None):
+def get_audio_chunk(filename, size, bytes_per_sample, duration=5, sr=22050, start=None):
     chunk_samples = duration*sr
     f = open(filename, 'rb')
     # size = os.fstat(f.fileno()).st_size // bytes_per_sample
@@ -1028,18 +1039,18 @@ def get_audio_chunk(filename, size, duration=5, sr=22050, bytes_per_sample=8, st
         return np.array([])
     return audio_chunk.copy()
 
-def get_bin_audio(filename):
+def get_bin_audio(filename, dtype=float):
     f = open(filename, 'rb')
-    audio = np.frombuffer(f.read())
+    audio = np.frombuffer(f.read(), dtype=dtype)
     f.close()
     return audio
 
-def fix_corrupted_files(files_data, TRAIN_FOLDER, target_sr=22050, pydub=True, res_type='kaiser_fast'):
+def fix_corrupted_files(files_data, TRAIN_FOLDER, bytes_per_sample, target_sr=22050, pydub=True, res_type='kaiser_fast'):
     corrupted_files = []
     duration = 1
     for i, filename in enumerate(files_data.keys()):
         size = files_data[filename]['size']
-        audio = get_audio_chunk(filename, size, duration=duration, sr=target_sr, start=size-duration*target_sr)
+        audio = get_audio_chunk(filename, size, bytes_per_sample, duration=duration, sr=target_sr, start=size-duration*target_sr)
         if len(audio) == 0:
             print(filename, 'fixed')
             corrupted_files.append(filename)

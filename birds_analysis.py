@@ -87,7 +87,7 @@ def analyze_audio(model, audio, classes, sr, duration, min_std, device, fr=-1, a
     
     y_pred_softmax = torch.sigmoid(y_pred)
     
-    sorted_idxs = y_pred_softmax[0].argsort().detach().numpy()[::-1]
+    sorted_idxs = y_pred_softmax[0].argsort().detach().cpu().numpy()[::-1]
     for sid in sorted_idxs:
         print(classes[sid], int(y_pred_softmax[0][sid].item()*100)/100, end=', ')
         
