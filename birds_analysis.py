@@ -30,7 +30,7 @@ def multilabel_metrics(y_pred, y_test, p_thres=0.5):
     micro_F1 = get_F1_micro(TP, FP, FN)
     return TP, FP, FN, micro_F1, total
 
-def get_class_dataset(val_files, selected_cl, duration, sr, min_std, params, N=160, multilabel=False):
+def get_class_dataset(val_files, selected_cl, N=160):
     classes_files = {}
     for f in val_files:
         cl = f.split('/')[-2]
@@ -41,9 +41,7 @@ def get_class_dataset(val_files, selected_cl, duration, sr, min_std, params, N=1
     files_to_sample = classes_files[selected_cl]*N
     classes = list(classes_files.keys())
 
-    validation_set = Dataset(files_to_sample, list(classes_files.keys()), chunk_seconds=duration, sr=sr, min_std=min_std, multilabel=multilabel)
-    validation_generator = torch.utils.data.DataLoader(validation_set, **params)
-    return validation_generator, classes_files
+    return files_to_sample, classes_files
 
 def sample_audio_clip(clip, chunk_samples, min_std):
     def sample_audio(clip):
