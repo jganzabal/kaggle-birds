@@ -25,15 +25,9 @@ def get_std_stats(clip, sr, seconds_to_analyze = 1):
     stds = clip[:croped_audio].reshape(-1, samples_to_analyse).std(axis=1)
     return np.max(stds), np.mean(stds), np.min(stds)
 
-def mp3_to_samples(file, target_sr=22050, pydub=True, res_type='kaiser_fast'):
-    if pydub:
-        sound = AudioSegment.from_mp3(file)
-        sound = sound.set_frame_rate(target_sr)
-        clip = sound.get_array_of_samples()
-        clip = np.array(clip)
-    else:
-        clip, sr = librosa.load(file, sr=target_sr, res_type=res_type)
-        clip = clip.astype('float64')
+def mp3_to_samples(file, target_sr=22050, res_type='kaiser_fast'):
+    clip, sr = librosa.load(file, sr=target_sr, res_type=res_type)
+    clip = clip.astype('float64')
         
     clip = (clip - clip.mean())/clip.std()
     return clip
@@ -64,7 +58,7 @@ def audio_to_file(TRAIN_FOLDER, TARGET_FOLDER, extentions, classes, target_sr = 
                 dst_file = dst_folder  + name + '.npy'
             if not os.path.exists(dst_file) and (dst_file not in files_data):
                 try:
-                    clip = mp3_to_samples(file, target_sr=target_sr, pydub=pydub, res_type=res_type)
+                    clip = mp3_to_samples(file, target_sr=target_sr, res_type=res_type)
                     std_max, std_mean, std_min = get_std_stats(clip, target_sr)
                     files_data[dst_file] = {}
                     files_data[dst_file]['std_max'] = std_max
@@ -76,7 +70,7 @@ def audio_to_file(TRAIN_FOLDER, TARGET_FOLDER, extentions, classes, target_sr = 
                         bytes_copied = f.write(clip.tobytes())
                         if bytes_copied != len(clip)*8:
                             print('Error en la copia!!!!')
-                        f.flush()
+#                         f.flush()
                         f.close()
                     else:
                         np.save(dst_file, clip)
@@ -249,7 +243,7 @@ def create_train_val_folders_with_diff_files(dataset_folder, all_subfolder = 'al
 
 
 ##########
-from pydub import AudioSegment
+# from pydub import AudioSegment
 
 FOLDER = '/home/usuario/birds/birdsong-recognition/'
 TRAIN_FOLDER = FOLDER + 'train_audio/'
@@ -582,8 +576,9 @@ def multilabel_metrics(y_pred, y_test, p_thres=0.5):
     TP = (positives * y_test).sum(axis=0)
     FP = (positives * (1 - y_test)).sum(axis=0)
     FN = ((1 - positives) * y_test).sum(axis=0)
+    T_total = (y_test > thres).sum()
     micro_F1 = get_F1_micro(TP, FP, FN)
-    return TP, FP, FN, micro_F1, total
+    return TP, FP, FN, micro_F1, total, T_total
 
 def get_F1_micro(TP, FP, FN):
     return TP.sum()/(TP.sum() + 0.5*(FP.sum() + FN.sum())).item()
@@ -596,22 +591,24 @@ def validate(model, dgen_val, criterion, device, metrics_func=multilabel_metrics
         FPs = 0
         FNs = 0
         total_predictions = 0
+        T_totals = 0
         batches_per_epoch = len(dgen_val)
         for i, (X, y) in enumerate(dgen_val):
             inputs, labels = X.to(device), y.to(device)
             _, y_pred = model(inputs)
             loss = criterion(y_pred, labels)
-            TP, FP, FN, micro_F1, total = metrics_func(y_pred, labels)
+            TP, FP, FN, micro_F1, total, T_total = metrics_func(y_pred, labels)
             TPs = TPs + TP.sum()
             FPs = FPs + FP.sum()
             FNs = FNs + FN.sum()
+            T_totals = T_totals + T_total
             total_predictions = total_predictions + total
             
             running_loss = running_loss + loss
             
             avg_loss = running_loss/(i+1)
             avg_F1 = get_F1_micro(TPs, FPs, FNs)
-            avg_acc = TPs/total_predictions
+            avg_acc = TPs/T_totals
             print(f'\r{i+1}/{batches_per_epoch} - val loss: {avg_loss}, val F1 micro: {avg_F1} val acc: {avg_acc}', end='')
     model.train()
     return avg_loss.detach().item(), avg_F1.detach().item(), avg_acc.detach().item()
@@ -619,7 +616,7 @@ def validate(model, dgen_val, criterion, device, metrics_func=multilabel_metrics
 from birds_filters import get_ambient_noise
 
 class Dataset(torch.utils.data.Dataset):
-    def __init__(self, list_IDs, classes, std_stats, chunk_seconds, sr, min_std, multilabel=False, add_noise=False, add_ambient_noise=False):
+    def __init__(self, list_IDs, classes, std_stats, chunk_seconds, sr, min_std, multilabel=False, add_noise=False, add_ambient_noise=False, max_tries = 10):
         'Initialization'
         self.std_stats = std_stats
         self.add_ambient_noise = add_ambient_noise
@@ -633,6 +630,14 @@ class Dataset(torch.utils.data.Dataset):
         self.multilabel = multilabel
         self.add_noise = add_noise
         self.chunk_seconds = chunk_seconds
+        self.stats = {
+            'noise': 0,
+            'noise+signal': 0,
+            'signal': 0,
+            'passband_noise': 0,
+            'short_file': 0
+        }
+        self.max_tries = max_tries
 
     def sample_audio_clip(self, clip):
         fr = int(np.random.rand(1)*(len(clip)-self.chunk_samples))
@@ -654,6 +659,8 @@ class Dataset(torch.utils.data.Dataset):
         # Select sample
         ID = self.list_IDs[index]
         if ID not in self.std_stats:
+            # Failed to load file stats
+            self.stats['noise'] = self.stats['noise'] + 1
             return self.get_normal_noise()
         
         file_stats = self.std_stats[ID]
@@ -663,6 +670,9 @@ class Dataset(torch.utils.data.Dataset):
         
         # File to short return random noise
         if audio_size < self.chunk_samples:
+            # Audio size too short
+            self.stats['noise'] = self.stats['noise'] + 1
+            self.stats['short_file'] = self.stats['short_file'] + 1
             return self.get_normal_noise()
         
         # Load data and get label
@@ -670,37 +680,36 @@ class Dataset(torch.utils.data.Dataset):
         std = X.std()
         
         if len(X) == 0:
+            # Failed to load audio
+            self.stats['noise'] = self.stats['noise'] + 1
             return self.get_normal_noise()
         
         n_tries = 0
-        max_tries = 10
-#         print('_________')
-#         print(std)
-        while (std < std_thres) and (n_tries<max_tries):
+
+        while (std < std_thres) and (n_tries<self.max_tries):
             n_tries += 1
             new_X = get_audio_chunk(ID, audio_size, duration=self.chunk_seconds, sr=self.sr, bytes_per_sample=8)
             new_std = new_X.std()
-#             print(new_std)
             if new_std>std:
                 std = new_std
                 X = new_X
-#         print('best:', X.std())
-            
-#         if n_tries == max_tries:
-#             print('n_tries exceed!')
+
         # Add random noise half of the time
         if np.random.randint(2) == 1 and self.add_noise:
             # Half of the time add white noise
             X = X + np.random.normal(0, 1-stds_min, len(X))
+            self.stats['noise+signal'] = self.stats['noise+signal'] + 1
         
         # Reshape for 1 channel 1D CNN (channel first)
         X = torch.from_numpy(X.reshape(1, -1)).float()
         
         # only noise 1/n_classes
         if np.random.rand()<1/self.n_classes and self.add_noise:
+            self.stats['noise'] = self.stats['noise'] + 1
             y = torch.zeros(self.n_classes)
             X = torch.from_numpy(np.random.normal(0, 1, X.shape)).float()
         elif self.multilabel:
+            self.stats['signal'] = self.stats['signal'] + 1
             y = torch.zeros(self.n_classes)
             y[self.classes_dict[ID.split('/')[-2]]] = 1
         else:
@@ -708,6 +717,7 @@ class Dataset(torch.utils.data.Dataset):
             
         if np.random.randint(2) == 1 and self.add_ambient_noise:
             ambient_noise = get_ambient_noise(X.shape[1], self.sr)
+            self.stats['passband_noise'] = self.stats['passband_noise'] + 1
             if not np.isnan(ambient_noise.sum()):
                 X = X + torch.from_numpy(ambient_noise.reshape(1, -1)).float()
         return X, y
@@ -1040,3 +1050,67 @@ def fix_corrupted_files(files_data, TRAIN_FOLDER, target_sr=22050, pydub=True, r
         f = open(filename, 'wb')
         f.write(clip.tobytes())
         f.close()
+        
+        
+def get_fourier_weights_for_mel(window_size):
+    frec = np.linspace(-window_size//2, 0, window_size//2+1)
+    time = np.linspace(0, window_size-1, window_size)
+    hanning_window = np.hanning(window_size)
+
+    filters_cos = []
+    filters_sin = []
+    for f in frec:
+        filters_cos.append(np.cos(2*np.pi*f*time/window_size))
+        filters_sin.append(np.sin(2*np.pi*f*time/window_size))
+    filters_cos = np.array(filters_cos)[::-1]*hanning_window
+    filters_sin = np.array(filters_sin)[::-1]*hanning_window
+    return filters_cos, filters_sin
+
+def get_pytorch_model_mel(window_size = 2048, resnet='resnet18', pretrained=True, n_classes=10, init_fourier=True, train_fourier=False, sr=22050, n_mels=128, amin=1e-10, top_db=80.0):
+    kernel_size = window_size
+    stride = kernel_size//8
+    filters = kernel_size//2 + 1
+    mel_filters = librosa.filters.mel(sr, kernel_size, n_mels=n_mels)
+    model_resnet = torch.hub.load('pytorch/vision:v0.6.0', resnet, pretrained=pretrained)
+    if resnet=='resnet18':
+        linear_inp = 512
+    else:
+        linear_inp = 2048
+    class Net(nn.Module):
+        def __init__(self):
+            super(Net, self).__init__()
+            self.cos = nn.Conv1d(1, filters, kernel_size, stride=stride)
+            self.sin = nn.Conv1d(1, filters, kernel_size, stride=stride)
+            
+            if init_fourier:
+                cos_weights, sin_weights = get_fourier_weights_for_mel(window_size)
+                self.cos.weight.data = torch.from_numpy(cos_weights.reshape(cos_weights.shape[0], 1, cos_weights.shape[1])).float()
+                self.sin.weight.data = torch.from_numpy(sin_weights.reshape(sin_weights.shape[0], 1, sin_weights.shape[1])).float()
+                self.cos.bias.data = torch.zeros(self.cos.bias.data.shape)
+                self.sin.bias.data = torch.zeros(self.sin.bias.data.shape)
+                
+            self.mel_filter = nn.Conv1d(mel_filters.shape[1], mel_filters.shape[0], 1)
+            
+            self.mel_filter.weight.data[:,:,0] = torch.from_numpy(mel_filters)
+            self.mel_filter.bias.data = torch.zeros(self.mel_filter.bias.data.shape)
+            
+            self.resnet = nn.Sequential(*list(model_resnet.children())[:-1])
+            self.conv_out = nn.Conv2d(linear_inp, n_classes, 1)
+        def forward(self, x):
+            
+            stft = self.cos(x)**2 + self.sin(x)**2
+            mel_out = self.mel_filter(stft)
+            x_spec = 10.0 * torch.log10(torch.clamp(mel_out, min=amin))
+            x_spec = torch.clamp(x_spec, min=x_spec.max().item() - top_db)
+            x_spec = (x_spec + 25)/80
+            x = torch.reshape(x_spec, (len(x_spec), 1, n_mels, -1))
+            x = torch.cat([x, x, x], dim=1)
+            x = self.resnet(x)
+            x = self.conv_out(x).flatten(start_dim=1)
+#             return stft, mel_out, x_spec, x
+            return x_spec, x
+    model = Net()
+    if not train_fourier:
+        list(model.cos.parameters())[0].requires_grad = False
+        list(model.sin.parameters())[0].requires_grad = False
+    return model
