@@ -626,12 +626,11 @@ def validate(model, dgen_val, criterion, device, metrics_func=multilabel_metrics
 from birds_filters import get_ambient_noise
 
 class Dataset(torch.utils.data.Dataset):
-    def __init__(self, list_IDs, classes, std_stats, chunk_seconds, bytes_per_sample, sr, min_std, multilabel=False, add_noise=False, add_ambient_noise=False, max_tries = 10):
+    def __init__(self, list_IDs, classes, std_stats, chunk_seconds, bytes_per_sample, sr, multilabel=True, add_noise=False, add_ambient_noise=False, max_tries = 10):
         'Initialization'
         self.bytes_per_sample = bytes_per_sample
         self.std_stats = std_stats
         self.add_ambient_noise = add_ambient_noise
-        self.min_std = min_std
         self.list_IDs = list_IDs
         self.classes = classes
         self.n_classes = len(classes)
@@ -1022,21 +1021,32 @@ def validate_model_loss_detail(model, dgen_val, criterion, device):
 
 
 def get_audio_chunk(filename, size, bytes_per_sample, duration=5, sr=22050, start=None):
+    extention = filename.split('.')[-1]
+    if bytes_per_sample == 8:
+        dtype = 'float64'
+    else:
+        dtype = 'float32'
     chunk_samples = duration*sr
-    f = open(filename, 'rb')
+    
     # size = os.fstat(f.fileno()).st_size // bytes_per_sample
     if start is None:
         if chunk_samples == size:
             start = 0
         else:
             start = np.random.randint(size - chunk_samples)
+    if extention == 'bin':
+        f = open(filename, 'rb')
+        f.seek(start*bytes_per_sample)
+        audio_chunk = np.frombuffer(f.read(chunk_samples*bytes_per_sample), dtype=dtype)
+        f.close()
+        if len(audio_chunk) != chunk_samples:
+            print(filename, start, chunk_samples, len(audio_chunk))
+            return np.array([])
+    elif extention == 'wav':
+        offset = start/sr
+        audio_chunk, sr = librosa.load(filename, sr=sr, mono=True, offset=offset, duration=duration)
     
-    f.seek(start*bytes_per_sample)
-    audio_chunk = np.frombuffer(f.read(chunk_samples*bytes_per_sample))
-    f.close()
-    if len(audio_chunk) != chunk_samples:
-        print(filename, start, chunk_samples, len(audio_chunk))
-        return np.array([])
+    
     return audio_chunk.copy()
 
 def get_bin_audio(filename, dtype=float):
@@ -1077,7 +1087,7 @@ def get_fourier_weights_for_mel(window_size):
     filters_sin = np.array(filters_sin)[::-1]*hanning_window
     return filters_cos, filters_sin
 
-def get_pytorch_model_mel(window_size = 2048, resnet='resnet18', pretrained=True, n_classes=10, init_fourier=True, train_fourier=False, sr=22050, n_mels=128, amin=1e-10, top_db=80.0):
+def get_pytorch_model_mel(window_size = 2048, resnet='resnet18', pretrained=True, n_classes=10, init_fourier=True, init_mel=True, train_fourier=False, train_mel=False, sr=22050, n_mels=128, amin=1e-10, top_db=80.0):
     kernel_size = window_size
     stride = kernel_size//8
     filters = kernel_size//2 + 1
@@ -1102,8 +1112,9 @@ def get_pytorch_model_mel(window_size = 2048, resnet='resnet18', pretrained=True
                 
             self.mel_filter = nn.Conv1d(mel_filters.shape[1], mel_filters.shape[0], 1)
             
-            self.mel_filter.weight.data[:,:,0] = torch.from_numpy(mel_filters)
-            self.mel_filter.bias.data = torch.zeros(self.mel_filter.bias.data.shape)
+            if init_mel:
+                self.mel_filter.weight.data[:,:,0] = torch.from_numpy(mel_filters)
+                self.mel_filter.bias.data = torch.zeros(self.mel_filter.bias.data.shape)
             
             self.resnet = nn.Sequential(*list(model_resnet.children())[:-1])
             self.conv_out = nn.Conv2d(linear_inp, n_classes, 1)
@@ -1121,7 +1132,111 @@ def get_pytorch_model_mel(window_size = 2048, resnet='resnet18', pretrained=True
 #             return stft, mel_out, x_spec, x
             return x_spec, x
     model = Net()
-    if not train_fourier:
-        list(model.cos.parameters())[0].requires_grad = False
-        list(model.sin.parameters())[0].requires_grad = False
+    list(model.cos.parameters())[0].requires_grad = train_fourier
+    list(model.sin.parameters())[0].requires_grad = train_fourier
+
+    list(model.mel_filter.parameters())[0].requires_grad = train_mel
+        
     return model
+
+
+def mel_spectrogram_pytorch(window_size = 2048, init_fourier=True, train_fourier=False, init_mel=True, train_mel=False, sr=22050, n_mels=128, amin=1e-10, top_db=80.0):
+    kernel_size = window_size
+    stride = kernel_size//8
+    filters = kernel_size//2 + 1
+    mel_filters = librosa.filters.mel(sr, kernel_size, n_mels=n_mels)
+    
+    class Net(nn.Module):
+        def __init__(self):
+            super(Net, self).__init__()
+            self.cos = nn.Conv1d(1, filters, kernel_size, stride=stride)
+            self.sin = nn.Conv1d(1, filters, kernel_size, stride=stride)
+            
+            if init_fourier:
+                cos_weights, sin_weights = get_fourier_weights_for_mel(window_size)
+                self.cos.weight.data = torch.from_numpy(cos_weights.reshape(cos_weights.shape[0], 1, cos_weights.shape[1])).float()
+                self.sin.weight.data = torch.from_numpy(sin_weights.reshape(sin_weights.shape[0], 1, sin_weights.shape[1])).float()
+                self.cos.bias.data = torch.zeros(self.cos.bias.data.shape)
+                self.sin.bias.data = torch.zeros(self.sin.bias.data.shape)
+              
+            self.mel_filter = nn.Conv1d(mel_filters.shape[1], mel_filters.shape[0], 1)
+            
+            if init_mel:
+                self.mel_filter.weight.data[:,:,0] = torch.from_numpy(mel_filters)
+                self.mel_filter.bias.data = torch.zeros(self.mel_filter.bias.data.shape)
+        def forward(self, x):
+            stft = self.cos(x)**2 + self.sin(x)**2
+            mel_out = self.mel_filter(stft)
+            x_spec = 10.0 * torch.log10(torch.clamp(mel_out, min=amin))
+            x_spec = torch.clamp(x_spec, min=x_spec.max().item() - top_db)
+            x_spec = (x_spec + 25)/80
+            
+            return x_spec
+    model = Net()
+    
+    list(model.cos.parameters())[0].requires_grad = train_fourier
+    list(model.sin.parameters())[0].requires_grad = train_fourier
+
+    list(model.mel_filter.parameters())[0].requires_grad = train_mel
+        
+    return model
+
+import time
+from datetime import timedelta
+
+def train_model(model, dataset, validation_generator, criterion, optimizer, name, device, metrics_func=multilabel_metrics, epochs=1, best_metric = np.inf):
+    model.train()
+    batches_per_epoch = len(dataset)
+    losses = []
+    F1s = []
+    val_losses = []
+    val_F1s = []
+    for epoch in range(epochs):  # loop over the dataset multiple times
+        running_loss = 0.0
+        TPs = 0
+        FPs = 0
+        FNs = 0
+        total_predictions = 0
+        T_totals = 0
+        model.train()
+        start_time = time.time()
+        for i, (X, y) in enumerate(dataset):
+            # Get the inputs; data is a list of [inputs, labels]
+            inputs, labels = X.to(device), y.to(device)
+            # (1) Initialise gradients
+            optimizer.zero_grad()
+            # (2) Forward pass
+            _, y_pred = model(inputs)
+            loss = criterion(y_pred, labels)
+            running_loss = running_loss + loss
+            # (3) Backward
+            loss.backward()
+            # (4) Compute the loss and update the weights
+            optimizer.step()
+            TP, FP, FN, micro_F1, total, T_total = metrics_func(y_pred, labels)
+            TPs = TPs + TP.sum()
+            FPs = FPs + FP.sum()
+            FNs = FNs + FN.sum()
+            total_predictions = total_predictions + total
+            T_totals = T_totals + T_total
+            
+            avg_loss = running_loss/(i+1)
+            avg_F1 = get_F1_micro(TPs, FPs, FNs)
+            avg_acc = TPs/T_totals
+            print(f'\r{epoch+1}/{epochs} - {i+1}/{batches_per_epoch} - loss: {avg_loss}, F1 micro: {avg_F1}, acc: {avg_acc}', end=', ')
+        elapesed_time = (time.time() - start_time)
+        print(f'elapesed_time: {timedelta(seconds=elapesed_time)}')
+        losses.append(avg_loss.item())
+        F1s.append(avg_F1.item())
+        avg_loss, avg_F1, avg_acc = validate(model, validation_generator, criterion, device, metrics_func=multilabel_metrics)
+        val_losses.append(avg_loss)
+        val_F1s.append(avg_F1)
+        if avg_loss<best_metric:
+            best_metric = avg_loss
+            print()
+            print('Best model saved')
+            torch.save(model.state_dict(), f'{name}_{int(best_metric*100000 + 0.5)/100000}.pth')
+        else:
+            print()
+        print('--------------------------------------------------------------------------')
+    return epoch+1, losses, F1s, val_losses, val_F1s
